@@ -75,11 +75,8 @@ class BoxCropDataset(Dataset):
 
 
 def sampler_weights(labels, snr):
-    """Class-balanced and SNR-balanced sampling (R&D Section 7)."""
-    w_cls = 1.0 / np.bincount(labels, minlength=len(FAMILIES))[labels]
-    b = np.digitize(snr, [10, 15, 20, 25])
-    w_snr = 1.0 / np.bincount(b)[b]
-    w = w_cls * w_snr
+    """Class-balanced sampling (R&D Section 7). No SNR re-balancing: the train set is already skewed towards low SNR on purpose."""
+    w = 1.0 / np.bincount(labels, minlength=len(FAMILIES))[labels]
     return w / w.sum()
 
 

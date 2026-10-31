@@ -101,6 +101,7 @@ class Detector:
         info = json.loads(meta.read_text()) if meta.exists() else {}
         self.single_class = info.get("single_class", len(self.model.names) == 1)
         self.time_scale = int(info.get("time_scale", 1))
+        self.imgsz = int(info.get("imgsz", IMGSZ))             # models trained before --imgsz have 1024 in meta.json or no meta at all
         self.conf, self.iou, self.device = conf, iou, ultra_device(device)
 
     def detect_batch(self, dbs, conf=None, batch=32):
@@ -108,7 +109,7 @@ class Detector:
         for s in range(0, len(dbs), batch):
             ts = self.time_scale
             imgs = [np.repeat(np.repeat(db_to_gray(d), ts, axis=0)[:, :, None], 3, axis=2) for d in dbs[s:s + batch]]
-            for r in self.model.predict(imgs, imgsz=IMGSZ, conf=self.conf if conf is None else conf, iou=self.iou, max_det=50,
+            for r in self.model.predict(imgs, imgsz=self.imgsz, conf=self.conf if conf is None else conf, iou=self.iou, max_det=50,
                                         device=self.device, verbose=False):
                 res = []
                 for (xa, ya, xb, yb), c, k in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy(), r.boxes.cls.cpu().numpy()):
@@ -159,7 +160,7 @@ def train(a):
     from ultralytics import YOLO
     set_seed(a.seed)
     root = find_dataset_root(a.root)
-    out = Path(a.out or PROJECT_DIR / "runs" / ("detector_1cls" if a.single_class else "detector"))   # the names Evaluation.ipynb looks for
+    out = Path(a.out or PROJECT_DIR / "runs" / ("detector_1cls" if a.single_class else "detector")).resolve()   # absolute: Ultralytics re-roots relative project paths under its runs_dir. The names Evaluation.ipynb looks for
     out.mkdir(parents=True, exist_ok=True)
     data = build_yolo_dataset(root, out / "data", a.single_class, a.max_scenes, seed=a.seed, time_scale=a.time_scale)
     if a.prepare_only:
@@ -170,17 +171,17 @@ def train(a):
     model = YOLO(a.model)
     model.train(
         trainer=noise_trainer(a.noise_prob, a.time_scale) if a.noise_prob > 0 else None,
-        data=str(data), epochs=a.epochs, imgsz=IMGSZ, rect=True, batch=a.batch, device=device, workers=a.workers,
+        data=str(data), epochs=a.epochs, imgsz=a.imgsz, rect=True, batch=a.batch, device=device, workers=a.workers,
         project=str(out), name="train", exist_ok=True, seed=a.seed, patience=a.patience or 100, cos_lr=True, plots=False,
-        box=a.box, cls=a.cls,
+        box=a.box, cls=a.cls, optimizer=a.optimizer, lr0=a.lr0, warmup_epochs=a.warmup_epochs, freeze=a.freeze,
         # only a frequency mirror: scale / translate / mosaic / colour would change the bandwidths, times and levels being labelled
         fliplr=0.5, flipud=0.0, mosaic=0.0, mixup=0.0, copy_paste=0.0, close_mosaic=0, scale=0.0, translate=0.0, degrees=0.0, shear=0.0,
         perspective=0.0, hsv_h=0.0, hsv_s=0.0, hsv_v=0.0, erasing=0.0)
     best = out / "train" / "weights" / "best.pt"
     shutil.copy(best, out / "best.pt")
-    save_json(dict(single_class=a.single_class, classes=["signal"] if a.single_class else FAMILIES, imgsz=IMGSZ, model=a.model,
+    save_json(dict(single_class=a.single_class, classes=["signal"] if a.single_class else FAMILIES, imgsz=a.imgsz, model=a.model,
                    epochs=a.epochs, time_scale=a.time_scale, noise_prob=a.noise_prob), out / "meta.json")
-    m = YOLO(str(out / "best.pt")).val(data=str(data), split="val", imgsz=IMGSZ, rect=True, batch=a.batch, device=device, plots=True, verbose=False,
+    m = YOLO(str(out / "best.pt")).val(data=str(data), split="val", imgsz=a.imgsz, rect=True, batch=a.batch, device=device, plots=True, verbose=False,
                                        project=str(out), name="val", exist_ok=True)
     metrics = dict(map50=float(m.box.map50), map50_95=float(m.box.map), precision=float(m.box.mp), recall=float(m.box.mr))
     save_json(metrics, out / "metrics_val.json")
@@ -200,9 +201,14 @@ def main():
     ap.add_argument("--single-class", action="store_true", help="one class 'signal' instead of the 6 families (two-stage pipeline)")
     ap.add_argument("--patience", type=int, default=15, help="early stopping patience in epochs (0 = Ultralytics default of 100)")
     ap.add_argument("--noise-prob", type=float, default=0.5, help="probability of adding extra noise power to a training image (0 = off)")
+    ap.add_argument("--imgsz", type=int, default=IMGSZ, help="network input size (long side, the frequency axis): >1024 upsamples the 1024-bin spectrogram, more pixels for narrow signals (slower, more memory)")
     ap.add_argument("--time-scale", type=int, default=1, help="repeat each frame N times: image height 128*N, finer grid on the time axis")
     ap.add_argument("--box", type=float, default=7.5, help="box loss gain (Ultralytics default 7.5)")
     ap.add_argument("--cls", type=float, default=0.5, help="classification loss gain (Ultralytics default 0.5)")
+    ap.add_argument("--optimizer", default="auto", help="auto | AdamW | SGD ... ('auto' ignores --lr0 and picks its own rate)")
+    ap.add_argument("--lr0", type=float, default=0.01, help="initial learning rate (only used with an explicit --optimizer; fine-tuning pretrained weights: ~0.0005 with AdamW)")
+    ap.add_argument("--warmup-epochs", type=float, default=3.0, help="learning-rate warmup epochs (Ultralytics default 3)")
+    ap.add_argument("--freeze", type=int, default=None, help="freeze the first N layers (10 = YOLO backbone), train only the head")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-scenes", type=int, default=None, help="use only the first N scenes of train and val (smoke test)")
     ap.add_argument("--prepare-only", action="store_true", help="only build the YOLO image/label folders")

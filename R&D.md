@@ -201,7 +201,7 @@ Placement and band-limiting rules:
 
 | Category | Range / model |
 |---|---|
-| SNR | **5 to 30 dB** in-band, in 1 dB steps, balanced across classes and burst types. A small **out-of-range stress set** (−5 to 5 dB and 30 to 35 dB) is generated for robustness reporting only; it is not part of acceptance |
+| SNR | **5 to 30 dB** in-band, balanced across classes and burst types. `train` is skewed towards the 5 dB floor (truncated exponential, about 75% of signals below 15 dB, so low SNR gets more data); `val` and the test sets are uniform so every SNR bin has enough samples for per-SNR reporting. A small **out-of-range stress set** (−5 to 5 dB and 30 to 35 dB) is generated for robustness reporting only; it is not part of acceptance |
 | Noise | AWGN (baseline); optionally colored noise |
 | Multipath / fading | None, Rician, Rayleigh (tiered difficulty) |
 | Carrier frequency offset | Common receiver offset (oscillator ppm x carrier) applied to the whole scene, plus small per-transmitter offsets (hundreds of Hz). USRP default: a TCXO of about 2 ppm (verify for your model), which is about ±300 Hz at 150 MHz and ±900 Hz at 450 MHz. With an external 10 MHz / GPSDO reference it drops far below that. Simulate both cases (±2 ppm and ±0.1 ppm), and also a wider ±10 ppm stress case. The common offset does not change differences between signals |
@@ -327,7 +327,7 @@ Max-softmax baseline, energy score, Mahalanobis distance on embeddings, deep ens
 - **Framework:** PyTorch (+ Lightning), Hydra configs, YOLO via Ultralytics or equivalent.
 - **Augmentation:** frequency shift, time shift, extra noise, random cropping, SpecAugment-style masking (check that masking does not erase the very separation being tested).
 - **Loss:** CE or focal loss for classification; standard detector losses; Dice + CE for segmentation.
-- **Imbalance:** class-balanced sampling, SNR-balanced batches.
+- **Imbalance:** class-balanced sampling. SNR is not re-balanced in training: the train set is deliberately skewed towards low SNR, and `val`/test stay uniform in SNR.
 - **Curriculum:** optionally train from high to low SNR.
 - **Self-supervised pretraining** (contrastive / masked autoencoder) on unlabeled spectrograms, compared against training from scratch (E9).
 - **Tuning rules:** hyperparameters tuned on the validation set only. The frozen test sets are touched **once per final model**.
