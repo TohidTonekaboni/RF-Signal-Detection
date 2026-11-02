@@ -1,5 +1,7 @@
 .venv
 dataset/
+dataset_boost/
+external_test/
 runs/
 /**/__pycache__
-logs/
+logs/dataset_hard/
