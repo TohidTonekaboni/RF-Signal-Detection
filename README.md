@@ -77,8 +77,11 @@ for c in 0.1 0.25 0.4; do
     | tee logs/diag_run7_conf${c}.txt
 done
 
-# Frozen test sets: in Evaluation.ipynb set  YOLO_1CLS_RUN = "detector_1cls_yolo26s_7"  and run all cells
-# (or headless, writes the executed copy to logs/):
-jupyter nbconvert --to notebook --execute Evaluation.ipynb --output-dir logs --output Evaluation_run7.ipynb
-# Compare with run 6 (Evaluation): test detection F1 0.912, test_robust detection F1 0.722, 1 kHz success 0.005
-# Also re-run section 5.3 of inference.ipynb with WEIGHTS = runs/detector_1cls_yolo26s_7/best.pt (before: 0 of 30 pairs resolved)
+# Frozen test sets with the run 7 detector (YOLO_1CLS_RUN selects the run; summary goes to runs/evaluation/detector_1cls_yolo26s_7/).
+# Executed copy is written to logs/. Baseline: run 6 (test detection F1 0.912, test_robust detection F1 0.722, 1 kHz success 0.005).
+YOLO_1CLS_RUN=detector_1cls_yolo26s_7 \
+  jupyter nbconvert --to notebook --execute Evaluation.ipynb --output-dir logs --output Evaluation_run7.ipynb
+
+# 1 kHz demo (section 5.3 of inference.ipynb) with the run 7 weights; before: 0 of 30 pairs resolved
+DETECTOR_WEIGHTS=runs/detector_1cls_yolo26s_7/best.pt \
+  jupyter nbconvert --to notebook --execute inference.ipynb --output-dir logs --output inference_run7.ipynb
