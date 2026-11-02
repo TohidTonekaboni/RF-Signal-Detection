@@ -52,11 +52,16 @@ done
 
 
 # Run 7
-# Run 6 data (CW/AM boost) plus (a) 40% of train sessions with harder receiver impairments (5 ppm, 10 bit ADC, Rician fading,
-# stronger DC/IQ imbalance: harder than train, still milder than test_robust) and (b) 15% of train scenes as close-spaced pairs
-# (250 Hz to 10 kHz). val and all test sets are generated exactly as before. New folder, takes a while.
+# Run 6 data (CW/AM boost) plus
+#  (a) 40% of train sessions with harder receiver impairments (5 ppm, 10 bit ADC, Rician fading, stronger DC/IQ imbalance:
+#      harder than train, still milder than test_robust),
+#  (b) 30% of train scenes as two-signal pairs, with the spacing drawn from 750 / 1000 / 1500 Hz and weighted 60% to 1 kHz
+#      (about 18% of all train scenes are exact 1 kHz pairs; before: 15% pairs, 40% of them at 1 kHz = 6%).
+# Pair scenes use the same generator as test_1khz (tiers T1/T2/T3, partial or full time overlap, SNR 5-30 dB) but other seeds.
+# val and all test sets are generated exactly as before. New folder, takes a while.
+# If test detection F1 drops, lower SPECTRUM_TRAIN_PAIR_FRAC (pair scenes hold only 2 signals).
 SPECTRUM_OUT=dataset_hard SPECTRUM_TRAIN_BOOST="CW=3,AM=2" \
-  SPECTRUM_TRAIN_MID_FRAC=0.4 SPECTRUM_TRAIN_PAIR_FRAC=0.15 \
+  SPECTRUM_TRAIN_MID_FRAC=0.4 SPECTRUM_TRAIN_PAIR_FRAC=0.3 SPECTRUM_TRAIN_PAIR_SEPS="750,1000,1000,1000,1500" \
   jupyter nbconvert --to notebook --execute 01_create_dataset.ipynb \
   --output-dir logs --output 01_create_dataset_hard.ipynb
 
@@ -76,3 +81,4 @@ done
 # (or headless, writes the executed copy to logs/):
 jupyter nbconvert --to notebook --execute Evaluation.ipynb --output-dir logs --output Evaluation_run7.ipynb
 # Compare with run 6 (Evaluation): test detection F1 0.912, test_robust detection F1 0.722, 1 kHz success 0.005
+# Also re-run section 5.3 of inference.ipynb with WEIGHTS = runs/detector_1cls_yolo26s_7/best.pt (before: 0 of 30 pairs resolved)
