@@ -205,14 +205,19 @@ def build_feature_table(reader, use_iq=True, include_unknown=False, desc="featur
 
 
 # =============================================================== feature classifier
-def make_gb(n_jobs=-1):
+def make_gb(kind="hgb", n_jobs=-1):
+    """kind "hgb" = scikit-learn HistGradientBoosting (default). "xgboost" is opt-in: on macOS it segfaults once torch has been imported
+    (two OpenMP runtimes in one process), which set_seed() does."""
     try:
+        if kind != "xgboost":
+            raise ImportError("scikit-learn boosting requested")
         from xgboost import XGBClassifier
         return XGBClassifier(objective="multi:softprob", n_estimators=300, max_depth=6, learning_rate=0.1, subsample=0.8,
                              colsample_bytree=0.8, tree_method="hist", n_jobs=n_jobs), "xgboost"
     except Exception as e:      # xgboost missing or its OpenMP runtime unavailable
         from sklearn.ensemble import HistGradientBoostingClassifier
-        print(f"xgboost unavailable ({type(e).__name__}); using sklearn HistGradientBoostingClassifier")
+        if kind == "xgboost":
+            print(f"xgboost unavailable ({type(e).__name__}); using sklearn HistGradientBoostingClassifier")
         return HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1, max_depth=8, early_stopping=True, random_state=0), "sklearn-hgb"
 
 
@@ -239,12 +244,12 @@ class FeatureClassifier:
         return self.model.predict_proba(X)
 
 
-def train_feature_classifier(train_reader, val_reader, use_iq=True):
+def train_feature_classifier(train_reader, val_reader, use_iq=True, gb="hgb"):
     from sklearn.utils.class_weight import compute_sample_weight
     tr = build_feature_table(train_reader, use_iq, desc="train features")
     va = build_feature_table(val_reader, use_iq, desc="val features")
-    names = [c for c in tr.columns if c not in ("label", "snr_db", "scene_idx")]
-    model, backend = make_gb()
+    names = [c for c in tr.columns if c not in ("label", "snr_db", "scene_idx") and tr[c].notna().any()]   # IQ features are all NaN when no IQ is stored
+    model, backend = make_gb(gb)
     t0 = time.time()
     model.fit(tr[names].to_numpy(np.float32), tr["label"].to_numpy(), sample_weight=compute_sample_weight("balanced", tr["label"]))
     pred = model.predict(va[names].to_numpy(np.float32))
@@ -261,6 +266,7 @@ def main():
     ap.add_argument("--max-scenes", type=int, default=None, help="use only the first N scenes of train and val (smoke test)")
     ap.add_argument("--tune-scenes", type=int, default=150, help="validation scenes used to tune CFAR")
     ap.add_argument("--no-iq", action="store_true", help="spectrogram features only (no envelope statistics from the stored IQ)")
+    ap.add_argument("--gb", default="hgb", choices=["hgb", "xgboost"], help="boosting backend (xgboost can segfault on macOS when torch is loaded)")
     ap.add_argument("--skip-cfar", action="store_true")
     ap.add_argument("--skip-features", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
@@ -276,7 +282,7 @@ def main():
         save_json(rows, out / "cfar_tuning.json")
         metrics["cfar_tuned_f1_val_subset"] = max(r["f1"] for r in rows)
     if not a.skip_features:
-        clf, m = train_feature_classifier(SetReader(root, "train", a.max_scenes), val, use_iq=not a.no_iq)
+        clf, m = train_feature_classifier(SetReader(root, "train", a.max_scenes), val, use_iq=not a.no_iq, gb=a.gb)
         clf.save(out / "feature_clf.joblib")
         metrics["feature_classifier_val"] = m
         print(f"feature classifier ({m['backend']}) val accuracy {m['accuracy']:.3f}  macro-F1 {m['macro_f1']:.3f}")

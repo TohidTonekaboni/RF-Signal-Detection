@@ -40,14 +40,15 @@ TEST_SETS = ["test", "test_robust", "test_openset", "test_snr_stress"]
 
 # ---------------------------------------------------------------- paths and device
 def find_dataset_root(root=None):
-    """Explicit path > $SPECTRUM_ROOT > newest dataset/spectrum_rf_v* folder next to this file."""
+    """Explicit path > $SPECTRUM_ROOT > newest version (biggest profile) of dataset/spectrum_rf_v* next to this file."""
     root = root or os.environ.get("SPECTRUM_ROOT")
     if root:
         return Path(root)
-    found = sorted((PROJECT_DIR / "dataset").glob("spectrum_rf_v*"))
+    found = list((PROJECT_DIR / "dataset").glob("spectrum_rf_v*"))
     if not found:
         raise FileNotFoundError("no dataset found: run 01_create_dataset.ipynb or pass --root")
-    return found[-1]
+    rank = {"smoke": 0, "pilot": 1, "main": 2}                  # newest version first, then the biggest profile (smoke < pilot < main)
+    return max(found, key=lambda p: (p.name.split("_")[2], rank.get(p.name.split("_")[-1], -1), p.name))
 
 
 def pick_device(name="auto"):
