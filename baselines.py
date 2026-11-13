@@ -1,4 +1,4 @@
-"""Classical baselines (R&D Section 4): CA/SO-CFAR detector and a feature-based gradient-boosting classifier.
+"""Classical baselines (R&D Section 4): CA/SO-CFAR detector and a feature-based gradient-boosting protocol classifier.
 
     python baselines.py                          # tune CFAR on val, train the feature classifier on train, evaluate on val
     python baselines.py --max-scenes 300 --no-iq # quick smoke run
@@ -39,9 +39,10 @@ class CFARParams:
     smooth_t: int = 3         # test statistic = box-car mean over smooth_t frames x smooth_f bins
     smooth_f: int = 3
     train_t: int = 8          # noise is averaged over +-train_t frames
-    guard_f: int = 40         # bins excluded around the cell under test (signals up to about 20 kHz wide)
-    train_f: int = 40         # training strip width on each side of the guard
-    close_f: int = 3          # merge gaps (AM carrier/sidebands, FSK tones) narrower than this many bins
+    guard_f: int = 16         # bins excluded around the cell under test (DMR / P25 / TETRA are 6 to 20 bins wide). LTE (about 860 bins) is wider
+                              # than guard + training strips, so this detector only finds its edges: a limit of the classical baseline
+    train_f: int = 24         # training strip width on each side of the guard
+    close_f: int = 2          # merge gaps narrower than this many bins
     min_cells: int = 6        # drop components smaller than this
 
 
@@ -195,7 +196,7 @@ def build_feature_table(reader, use_iq=True, include_unknown=False, desc="featur
         db = reader.spec_db(i)
         iq = reader.iq(i) if use_iq else None
         for b in bx.itertuples():
-            if b.family_id > 6 and not include_unknown:
+            if b.family_id > len(FAMILIES) and not include_unknown:
                 continue
             f = box_features(db, (b.box_x0, b.box_y0, b.box_x1, b.box_y1), iq, use_iq)
             f.update(label=int(b.family_id) - 1, snr_db=float(b.snr_db), scene_idx=i)

@@ -1,12 +1,12 @@
-"""Train a YOLO detector on the spectrogram images (time-frequency boxes, one class per modulation family).
+"""Train a YOLO detector on the spectrogram images (time-frequency boxes, one class per protocol: LTE, DMR, P25, TETRA).
 
     python train_detector.py                                  # YOLO26-nano from scratch, 40 epochs
     python train_detector.py --model yolo26s.yaml --epochs 60 # larger model
     python train_detector.py --single-class                   # one class "signal": boxes only, use with the classifier (two-stage); out = runs/detector_1cls
-    python train_detector.py --time-scale 2                   # repeat every frame 2x so the 128-frame images become 256 rows (finer time grid)
+    python train_detector.py --time-scale 2                   # repeat every frame 2x so the 192-frame images become 384 rows (finer time grid)
     python train_detector.py --max-scenes 300 --epochs 2      # quick smoke run
 
-The images are the 128 x 1024 spectrograms as grayscale PNG (-10..40 dB -> 0..255), the same convention as the YOLO export of
+The images are the 192 x 2048 spectrograms as grayscale PNG (-10..40 dB -> 0..255), the same convention as the YOLO export of
 01_create_dataset.ipynb. They are rebuilt here from the dataset shards, in shuffled order, into <out>/data (done once).
 Augmentation is limited to a frequency mirror and extra noise power (--noise-prob): scale, translation, mosaic and colour changes
 would alter bandwidths, burst times and levels, which are the labels. Added noise lowers the SNR but moves no box edge.
@@ -14,7 +14,7 @@ Training stops after --patience epochs without a better fitness (default 15; the
 
 Uses train and val only. The frozen test sets are evaluated once, in Evaluation.ipynb.
 Outputs in --out (default runs/detector): best.pt, meta.json, metrics_val.json, train/ (Ultralytics logs and weights), val/ (confusion
-matrix and PR curves of best.pt). diagnose_detector.py breaks the box quality down by SNR, family and box size.
+matrix and PR curves of best.pt). diagnose_detector.py breaks the box quality down by SNR, protocol and box size.
 Requires a recent Ultralytics release that includes YOLO26: pip install -U ultralytics
 YOLO26 is end-to-end (NMS-free), so the iou argument of predict() has no effect on it.
 """
@@ -35,13 +35,13 @@ try:
 except ImportError:                                          # ultralytics missing: only training and Detector need it
     _YOLODataset = object
 
-IMGSZ = 1024
+IMGSZ = 2048                                                # = N_FFT: one pixel per bin (DMR / P25 are only about 6 bins wide)
 
 
 # =============================================================== YOLO dataset built from the shards
 def build_yolo_dataset(root, out_dir, single_class=False, max_scenes=None, sets=("train", "val"), seed=0, time_scale=1, log=print):
     """Write <out_dir>/<set>/{images,labels} and data.yaml. Returns the path of data.yaml. Skipped if already built with the same settings.
-    time_scale repeats every frame that many times (image height 128 * time_scale); the normalised labels do not change."""
+    time_scale repeats every frame that many times (image height N_FRAMES * time_scale); the normalised labels do not change."""
     from PIL import Image
     out_dir = Path(out_dir)
     key = dict(root=str(root), single_class=single_class, max_scenes=max_scenes, sets=list(sets), seed=seed)
@@ -91,7 +91,7 @@ def ultra_device(name="auto"):
 
 # =============================================================== inference wrapper (used by Evaluation.ipynb)
 class Detector:
-    """Wraps a trained YOLO model. detect(db) -> [dict(box=(x0, y0, x1, y1) inclusive bins/frames, score, cls)], cls = family index or 0 (single class)."""
+    """Wraps a trained YOLO model. detect(db) -> [dict(box=(x0, y0, x1, y1) inclusive bins/frames, score, cls)], cls = protocol index (FAMILIES) or 0 (single class)."""
 
     def __init__(self, weights, device="auto", conf=0.05, iou=0.5):
         from ultralytics import YOLO
@@ -101,7 +101,7 @@ class Detector:
         info = json.loads(meta.read_text()) if meta.exists() else {}
         self.single_class = info.get("single_class", len(self.model.names) == 1)
         self.time_scale = int(info.get("time_scale", 1))
-        self.imgsz = int(info.get("imgsz", IMGSZ))             # models trained before --imgsz have 1024 in meta.json or no meta at all
+        self.imgsz = int(info.get("imgsz", IMGSZ))             # models trained before --imgsz have no meta.json entry
         self.conf, self.iou, self.device = conf, iou, ultra_device(device)
 
     def detect_batch(self, dbs, conf=None, batch=32):
@@ -198,11 +198,11 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--device", default="auto", help="auto | 0 (cuda) | mps | cpu")
-    ap.add_argument("--single-class", action="store_true", help="one class 'signal' instead of the 6 families (two-stage pipeline)")
+    ap.add_argument("--single-class", action="store_true", help="one class 'signal' instead of the 4 protocols (two-stage pipeline)")
     ap.add_argument("--patience", type=int, default=15, help="early stopping patience in epochs (0 = Ultralytics default of 100)")
     ap.add_argument("--noise-prob", type=float, default=0.5, help="probability of adding extra noise power to a training image (0 = off)")
-    ap.add_argument("--imgsz", type=int, default=IMGSZ, help="network input size (long side, the frequency axis): >1024 upsamples the 1024-bin spectrogram, more pixels for narrow signals (slower, more memory)")
-    ap.add_argument("--time-scale", type=int, default=1, help="repeat each frame N times: image height 128*N, finer grid on the time axis")
+    ap.add_argument("--imgsz", type=int, default=IMGSZ, help="network input size (long side, the frequency axis): below 2048 downsamples the 2048-bin spectrogram (DMR / P25 get thinner), above upsamples it (slower, more memory)")
+    ap.add_argument("--time-scale", type=int, default=1, help="repeat each frame N times: image height 192*N, finer grid on the time axis")
     ap.add_argument("--box", type=float, default=7.5, help="box loss gain (Ultralytics default 7.5)")
     ap.add_argument("--cls", type=float, default=0.5, help="classification loss gain (Ultralytics default 0.5)")
     ap.add_argument("--optimizer", default="auto", help="auto | AdamW | SGD ... ('auto' ignores --lr0 and picks its own rate)")

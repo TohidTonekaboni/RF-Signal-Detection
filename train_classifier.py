@@ -1,10 +1,10 @@
-"""Train the modulation-family classifier (CW / AM / FM / PSK / QAM / FSK) on spectrogram crops around labeled boxes.
+"""Train the protocol classifier (LTE / DMR / P25 / TETRA) on spectrogram crops around labeled boxes.
 
     python train_classifier.py                               # ResNet-18, 30 epochs, device picked automatically (cuda > mps > cpu)
     python train_classifier.py --arch resnet34 --epochs 40
     python train_classifier.py --max-scenes 300 --epochs 2   # quick smoke run
 
-Input of the network: a 2-channel crop of 64 frames x 128 bins around a box: channel 0 = spectrogram (dB, normalised),
+Input of the network: a 2-channel crop of 192 frames (the whole time axis: burst timing separates DMR / P25 / TETRA) x 256 bins (320 kHz) around a box: channel 0 = spectrogram (dB, normalised),
 channel 1 = box mask (tells the network which signal to classify when several overlap).
 Training uses the ground-truth boxes with jitter, so it also tolerates the boxes of a detector (two-stage pipeline).
 
@@ -108,7 +108,7 @@ def load_classifier(path, device=None):
 
 @torch.no_grad()
 def predict_crops(model, crops, device, batch=256):
-    """crops: float32 [n, 2, CROP_T, CROP_F] with channel 0 already normalised. Returns logits [n, 6]."""
+    """crops: float32 [n, 2, CROP_T, CROP_F] with channel 0 already normalised. Returns logits [n, 4]."""
     out = []
     for s in range(0, len(crops), batch):
         out.append(model(torch.from_numpy(crops[s:s + batch]).to(device)).float().cpu().numpy())

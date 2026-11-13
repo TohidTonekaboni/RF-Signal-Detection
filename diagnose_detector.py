@@ -1,11 +1,11 @@
-"""Break the detector's box quality down by SNR, family, bandwidth and duration, to see where recall and box regression fail.
+"""Break the detector's box quality down by SNR, protocol, bandwidth and duration, to see where recall and box regression fail.
 
     python diagnose_detector.py                                     # runs/detector/best.pt on val, conf 0.25, IoU 0.5
     python diagnose_detector.py --weights runs/detector_1cls/best.pt --conf 0.1
     python diagnose_detector.py --max-scenes 100                    # quick look
 
-Matching is class-agnostic (greedy one-to-one by score), so the numbers describe localisation; "cls acc" is the family accuracy of the
-matched boxes (6-class detector only). Per group: n ground-truth boxes, recall, mean IoU of the matched boxes, mean absolute error of the
+Matching is class-agnostic (greedy one-to-one by score), so the numbers describe localisation; "cls acc" is the protocol accuracy of the
+matched boxes (4-class detector only). Per group: n ground-truth boxes, recall, mean IoU of the matched boxes, mean absolute error of the
 four box edges (x0 / x1 in frequency bins, y0 / y1 in time frames) and how many of the misses have a prediction with IoU >= 0.1 (poorly
 placed rather than not found). Uses val by default; the frozen test sets are for Evaluation.ipynb. Writes diagnose_<set>.json next to the weights.
 """
@@ -70,8 +70,8 @@ def main():
     reader = SetReader(find_dataset_root(a.root), a.set, a.max_scenes)
     df, n_fp = collect(det, reader, a.conf, a.iou)
     df["snr_bin"] = snr_bin_labels(df.snr).to_numpy()
-    df["dur_bin"] = pd.cut(df.dur, [0, 8, 16, 32, 1000], labels=["<8 fr", "8-15 fr", "16-31 fr", ">=32 fr"], right=False)
-    df["bw_bin"] = pd.cut(df.bw, [0, 16, 32, 64, 2000], labels=["<16 bins", "16-31 bins", "32-63 bins", ">=64 bins"], right=False)
+    df["dur_bin"] = pd.cut(df.dur, [0, 20, 50, 100, 1000], labels=["<20 fr", "20-49 fr", "50-99 fr", ">=100 fr"], right=False)
+    df["bw_bin"] = pd.cut(df.bw, [0, 8, 16, 64, 4000], labels=["<8 bins", "8-15 bins", "16-63 bins", ">=64 bins"], right=False)
     df["all"] = "all"
 
     print(f"{a.weights}  set={a.set}  scenes={len(reader)}  conf={a.conf}  IoU>={a.iou}  false positives/scene={n_fp / len(reader):.2f}")

@@ -19,23 +19,23 @@ from numpy.lib.stride_tricks import sliding_window_view
 from scipy.signal import get_window
 
 # ---------------------------------------------------------------- constants (must match the generator)
-FS = 256_000.0
-N_FFT = 1024
-HOP = 256
-N_FRAMES = 128
+FS = 2_560_000.0                               # LTE 1.4 MHz needs > 1.1 MHz; DMR / P25 / TETRA are 12.5 / 12.5 / 25 kHz wide
+N_FFT = 2048                                   # 1250 Hz bins (DMR/P25 about 6 bins, TETRA about 20, LTE about 860)
+HOP = 1024                                     # 0.4 ms
+N_FRAMES = 192                                 # about 77 ms: more than one TETRA frame (56.7 ms) and 2.5 DMR slots
 N_SAMPLES = (N_FRAMES - 1) * HOP + N_FFT
 DF = FS / N_FFT
 DB_MIN, DB_MAX = -20.0, 60.0
 DB_STEP = (DB_MAX - DB_MIN) / 255.0
 PAD_DB = -2.4                                  # typical noise-floor level, used to pad crops at the scene edge
-FAMILIES = ["CW", "AM", "FM", "PSK", "QAM", "FSK"]   # class index i  <->  family_id i + 1 in the tables
-UNKNOWN_FAMILY_ID = 7
+FAMILIES = ["LTE", "DMR", "P25", "TETRA"]     # the protocols; class index i  <->  family_id i + 1 in the tables ("family" = protocol)
+UNKNOWN_FAMILY_ID = len(FAMILIES) + 1
 SNR_EDGES = [-np.inf, 5, 10, 15, 20, 25, 30, np.inf]
 SNR_LABELS = ["<5", "5-10", "10-15", "15-20", "20-25", "25-30", ">=30"]
-CROP_T, CROP_F = 64, 128                       # classifier crop: 64 frames x 128 bins (32 kHz) around a box
+CROP_T, CROP_F = N_FRAMES, 256                 # classifier crop: the whole time axis (burst timing separates DMR / P25 / TETRA) x 256 bins (320 kHz) around a box
 
 PROJECT_DIR = Path(__file__).resolve().parent
-TEST_SETS = ["test", "test_1khz", "test_robust", "test_openset", "test_snr_stress"]
+TEST_SETS = ["test", "test_robust", "test_openset", "test_snr_stress"]
 
 
 # ---------------------------------------------------------------- paths and device
@@ -143,7 +143,7 @@ _WIN_ENERGY = float(np.sum(_WIN.astype(np.float64) ** 2))
 
 
 def spectrogram_db(x):
-    """Complex baseband (unit-variance noise = 0 dB) -> float32 dB [128 frames, 1024 bins], bins ascending from -fs/2."""
+    """Complex baseband (unit-variance noise = 0 dB) -> float32 dB [N_FRAMES, N_FFT], bins ascending from -fs/2."""
     x = np.asarray(x)[:N_SAMPLES]
     if len(x) < N_SAMPLES:
         raise ValueError(f"need at least {N_SAMPLES} samples, got {len(x)}")
