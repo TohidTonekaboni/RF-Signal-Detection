@@ -9,11 +9,12 @@ channel 1 = box mask (tells the network which signal to classify when several ov
 Training uses the ground-truth boxes with jitter, so it also tolerates the boxes of a detector (two-stage pipeline).
 
 Uses train and val only. The frozen test sets are evaluated once, in Evaluation.ipynb.
-Outputs in --out (default runs/classifier): best.pt, last.pt, history.json, val_metrics.json, config.json.
+Outputs in --out (default runs/classifier): best.pt, last.pt, history.json, val_metrics.json, calibration.json (unknown-rejection threshold), config.json.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -125,6 +126,25 @@ def classify_boxes(model, spec, boxes, device):
 
 
 # =============================================================== training
+def energy_score(logits):
+    """Energy-based score for unknown detection: logsumexp of the logits. Known signals give a high value, unknown ones a low value."""
+    from scipy.special import logsumexp
+    return logsumexp(np.asarray(logits, np.float64), axis=1)
+
+
+def calibrate_unknown_threshold(val_logits, accept_known=0.95):
+    """Threshold on the energy score chosen on the validation boxes of the known protocols only: it accepts `accept_known` of them.
+    Boxes scoring below it are rejected as unknown. No unknown signal is used, so the test_openset signals stay held out."""
+    e = energy_score(val_logits)
+    return dict(score="logsumexp(logits)", accept_known=accept_known, energy_threshold=float(np.quantile(e, 1.0 - accept_known)), n_val_boxes=int(len(e)))
+
+
+def load_calibration(run_dir):
+    """The calibration.json written next to best.pt (None for runs trained before it existed)."""
+    f = Path(run_dir) / "calibration.json"
+    return json.loads(f.read_text()) if f.exists() else None
+
+
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -192,6 +212,9 @@ def train(a):
     metrics = cls_metrics(labels, logits.argmax(1), va.snr)
     metrics["best_epoch"] = ck["epoch"]
     save_json(metrics, out / "val_metrics.json")
+    cal = calibrate_unknown_threshold(logits, a.accept_known)
+    save_json(cal, out / "calibration.json")
+    print(f"unknown rejection: energy score logsumexp(logits) < {cal['energy_threshold']:.3f} -> unknown (keeps {100 * a.accept_known:.0f}% of the known val boxes)")
     print(f"best epoch {ck['epoch']}: val accuracy {metrics['accuracy']:.4f}  macro-F1 {metrics['macro_f1']:.4f}")
     for k, v in metrics["per_class"].items():
         print(f"  {k:4s} precision {v['precision']:.3f}  recall {v['recall']:.3f}  f1 {v['f1']:.3f}  (n={v['support']})")
@@ -211,6 +234,7 @@ def main():
     ap.add_argument("--patience", type=int, default=0, help="early stopping on val macro-F1 (0 = off)")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--device", default="auto", help="auto | cuda | mps | cpu")
+    ap.add_argument("--accept-known", type=float, default=0.95, help="share of the known val boxes the unknown-rejection threshold must keep (energy score)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-scenes", type=int, default=None, help="use only the first N scenes of train and val (smoke test)")
     train(ap.parse_args())

@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage import convolve1d, uniform_filter, uniform_filter1d
-from scipy.signal import find_peaks
+from scipy.signal import fftconvolve, find_peaks, firwin, resample_poly
 from scipy.stats import f as f_dist
 
 from spectrum_common import (DF, FAMILIES, FS, HOP, N_FFT, PROJECT_DIR, SetReader, box_bandwidth_hz, box_center_hz, cls_metrics,
@@ -94,6 +94,7 @@ def detection_f1(pred_lists, gt_lists, thr=0.5):
 
 def gt_boxes(reader, i):
     b = reader.boxes(i)
+    b = b[b.family_id <= len(FAMILIES)]                    # distractors (AM, CW, POCSAG) and held-out signals are not targets
     return [(r.box_x0, r.box_y0, r.box_x1, r.box_y1) for r in b.itertuples()]
 
 
@@ -156,7 +157,69 @@ def spec_features(db, box):
         wander=cent_t.std() / w, peak_wander=reg.argmax(1).std() / w)
 
 
-IQ_FEATURES = ["env_kurt", "env_cv", "env_papr", "inst_freq_std"]
+NB_FEATURES = ["nb_lvl_hi", "nb_lvl_lo", "nb_ratio", "nb_spread", "nb_sync_dmr", "nb_sync_p25"]
+IQ_FEATURES = ["env_kurt", "env_cv", "env_papr", "inst_freq_std"] + NB_FEATURES
+
+_NB_LP = firwin(255, 8_000.0, fs=320_000.0)             # channel filter at 320 kS/s: keeps the 12.5 kHz channel, rejects neighbours
+
+
+def _sync_templates():
+    """DMR (4 sync words) and P25 (1 frame sync word) as 24-symbol 4FSK level sequences (the same words the generator embeds)."""
+    from protocols import DMR_SYNC, P25_SYNC, _LEVEL, _hex_dibits
+    dmr = [np.array([_LEVEL[d] for d in _hex_dibits(h)]) for h in DMR_SYNC.values()]
+    return dmr, np.array([_LEVEL[d] for d in _hex_dibits(P25_SYNC)])
+
+
+def nb_features(iq, box, max_bw_hz=16_000.0):
+    """4FSK features of a narrowband box from the stored IQ, to separate DMR from P25 (both 4800 baud, 12.5 kHz).
+
+    The box is mixed to 0 Hz, filtered and decimated to 48 kS/s (10 samples per symbol) and FM demodulated. At the best symbol timing the
+    instantaneous frequency falls on four levels: +-u and +-3u with u = 648 Hz (DMR) or 600 Hz (P25), so the outer level is 1944 or 1800 Hz.
+    Features: the two level magnitudes (2-means on |f|), their ratio (ideal 3), the within-level spread, and the best symbol match (0 to 1) of
+    the sliced symbols with the DMR sync words and with the P25 frame sync word (random data gives about 0.5 at the best of ~300 offsets)."""
+    nan = dict.fromkeys(NB_FEATURES, np.nan)
+    if iq is None or box_bandwidth_hz(box) > max_bw_hz:
+        return nan
+    x0, y0, x1, y1 = [int(v) for v in box]
+    seg = iq[max(y0 * HOP + N_FFT // 2 - HOP // 2, 0):y1 * HOP + N_FFT // 2 + HOP // 2]
+    if len(seg) < 20_000:                                   # under 8 ms: too few symbols
+        return nan
+    z = seg * np.exp(-2j * np.pi * box_center_hz(box) / FS * np.arange(len(seg)))
+    z = resample_poly(z, 1, 8)                              # 2.56 MS/s -> 320 kS/s
+    z = fftconvolve(z, _NB_LP, mode="same")
+    z = resample_poly(z, 3, 20)[20:-20]                     # 320 kS/s -> 48 kS/s
+    if len(z) < 400:
+        return nan
+    def two_means(a):                                       # 1-D 2-means on |f|: inner and outer level magnitude
+        c = np.array([np.percentile(a, 25), np.percentile(a, 90)])
+        for _ in range(15):
+            hi = a > c.mean()
+            if hi.all() or (~hi).all():
+                break
+            c = np.array([np.median(a[~hi]), np.median(a[hi])])
+        return c
+
+    # (1) levels: mean frequency over one symbol (10 samples), far less noisy than the instantaneous frequency
+    fw = np.angle(z[10:] * np.conj(z[:-10])) * 4_800.0 / (2 * np.pi)
+    fw = fw - np.median(fw)
+    aw = np.abs(fw[int(np.argmax([np.abs(fw[o::10]).mean() for o in range(10)]))::10])
+    c = two_means(aw)
+    hi = aw > c.mean()
+    spread = float(np.sqrt((np.sum((aw[hi] - c[1]) ** 2) + np.sum((aw[~hi] - c[0]) ** 2)) / len(aw)) / max(c[1], 1.0))
+
+    # (2) sync words: instantaneous frequency at the symbol centres (ISI-free for the raised-cosine pulse), sliced to the four levels
+    fi = np.convolve(np.angle(z[1:] * np.conj(z[:-1])) * 48_000.0 / (2 * np.pi), np.ones(3) / 3, mode="same")
+    fi = fi - np.median(fi)
+    v = fi[int(np.argmax([np.abs(fi[o::10]).mean() for o in range(10)]))::10]
+    ci = two_means(np.abs(v))
+    sym = np.sign(v) * np.where(np.abs(v) > ci.mean(), 3.0, 1.0)
+    dmr_t, p25_t = _sync_templates()
+    if len(sym) < 24:
+        return nan
+    win = np.lib.stride_tricks.sliding_window_view(sym, 24)
+    best = lambda t: float((win == t).mean(axis=1).max())
+    return dict(nb_lvl_hi=float(c[1]), nb_lvl_lo=float(c[0]), nb_ratio=float(c[1] / max(c[0], 1.0)), nb_spread=spread,
+                nb_sync_dmr=max(best(t) for t in dmr_t), nb_sync_p25=best(p25_t))
 
 
 def iq_features(iq, box):
@@ -176,7 +239,8 @@ def iq_features(iq, box):
     a = np.abs(x)
     m2 = np.mean(a ** 2) + 1e-12
     inst = np.angle(x[1:] * np.conj(x[:-1])) * FS / (2 * np.pi)
-    return dict(env_kurt=np.mean(a ** 4) / m2 ** 2, env_cv=a.std() / (a.mean() + 1e-12), env_papr=a.max() ** 2 / m2, inst_freq_std=inst.std() / max(bw, 1.0))
+    return dict(env_kurt=np.mean(a ** 4) / m2 ** 2, env_cv=a.std() / (a.mean() + 1e-12), env_papr=a.max() ** 2 / m2, inst_freq_std=inst.std() / max(bw, 1.0),
+                **nb_features(iq, box))
 
 
 def box_features(db, box, iq=None, use_iq=True):

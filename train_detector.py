@@ -27,8 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from spectrum_common import (FAMILIES, N_FFT, N_FRAMES, PROJECT_DIR, SetReader, db_to_gray, find_dataset_root, gray_to_db, save_json,
-                             set_seed)
+from spectrum_common import (FAMILIES, N_FFT, N_FRAMES, PROJECT_DIR, SetReader, db_to_gray, find_dataset_root, gray_to_db, mirror_suppress,
+                             save_json, set_seed)
 
 try:
     from ultralytics.data.dataset import YOLODataset as _YOLODataset
@@ -93,7 +93,7 @@ def ultra_device(name="auto"):
 class Detector:
     """Wraps a trained YOLO model. detect(db) -> [dict(box=(x0, y0, x1, y1) inclusive bins/frames, score, cls)], cls = protocol index (FAMILIES) or 0 (single class)."""
 
-    def __init__(self, weights, device="auto", conf=0.05, iou=0.5):
+    def __init__(self, weights, device="auto", conf=0.05, iou=0.5, mirror_filter=True):
         from ultralytics import YOLO
         weights = Path(weights)
         self.model = YOLO(str(weights))
@@ -103,6 +103,7 @@ class Detector:
         self.time_scale = int(info.get("time_scale", 1))
         self.imgsz = int(info.get("imgsz", IMGSZ))             # models trained before --imgsz have no meta.json entry
         self.conf, self.iou, self.device = conf, iou, ultra_device(device)
+        self.mirror_filter = mirror_filter                      # drop detections that are the IQ image of a stronger one (spectrum_common.mirror_suppress)
 
     def detect_batch(self, dbs, conf=None, batch=32):
         out = []
@@ -118,6 +119,8 @@ class Detector:
                     res.append(dict(box=(x0, y0, int(np.clip(round(xb) - 1, x0, N_FFT - 1)), int(np.clip(round(yb / ts) - 1, y0, N_FRAMES - 1))),
                                     score=float(c), cls=int(k)))
                 out.append(res)
+        if self.mirror_filter:
+            out = [mirror_suppress(res, db) for res, db in zip(out, dbs)]
         return out
 
     def detect(self, db, conf=None):

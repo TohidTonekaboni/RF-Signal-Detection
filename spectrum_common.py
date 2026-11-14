@@ -47,7 +47,7 @@ def find_dataset_root(root=None):
     found = list((PROJECT_DIR / "dataset").glob("spectrum_rf_v*"))
     if not found:
         raise FileNotFoundError("no dataset found: run 01_create_dataset.ipynb or pass --root")
-    rank = {"smoke": 0, "pilot": 1, "main": 2}                  # newest version first, then the biggest profile (smoke < pilot < main)
+    rank = {"smoke": 0, "mini": 1, "pilot": 2, "medium": 3, "main": 4}   # newest version first, then the biggest profile
     return max(found, key=lambda p: (p.name.split("_")[2], rank.get(p.name.split("_")[-1], -1), p.name))
 
 
@@ -186,6 +186,42 @@ def box_iou_matrix(a, b):
     area_a = (a[:, 2] - a[:, 0] + 1) * (a[:, 3] - a[:, 1] + 1)
     area_b = (b[:, 2] - b[:, 0] + 1) * (b[:, 3] - b[:, 1] + 1)
     return inter / (area_a[:, None] + area_b[None, :] - inter)
+
+
+def mirror_suppress(dets, db, tol_bins=2.5, min_gap_db=12.0, min_source_score=0.25):
+    """Remove detections that are the IQ image of a stronger one.
+
+    An IQ imbalance in the receiver mirrors every signal about the receiver centre (0 Hz) at 20 to 40 dB lower level. A detector can fire on
+    that copy. A detection is dropped when another detection with score >= min_source_score lies at the mirrored centre frequency
+    (within tol_bins), has a similar width and overlaps it in time, and is at least min_gap_db stronger (mean power inside the box).
+    A real signal at the mirror frequency is only lost if it is also 12 dB weaker than its mirror partner.
+    dets: [dict(box=(x0, y0, x1, y1), score, ...)], db: [N_FRAMES, N_FFT] spectrogram in dB."""
+    if len(dets) < 2:
+        return dets
+    db = np.asarray(db, np.float32)
+
+    def level(b):
+        return 10.0 * np.log10(np.mean(10.0 ** (db[b[1]:b[3] + 1, b[0]:b[2] + 1] / 10.0)) + 1e-12)
+
+    lv = [level(d["box"]) for d in dets]
+    cen = [box_center_hz(d["box"]) for d in dets]
+    keep = []
+    for i, d in enumerate(dets):
+        b = d["box"]
+        wi = b[2] - b[0] + 1
+        mirrored = False
+        for j, e in enumerate(dets):
+            if i == j or e["score"] < min_source_score or lv[j] - lv[i] < min_gap_db or abs(cen[i] + cen[j]) > tol_bins * DF:
+                continue
+            c = e["box"]
+            wj = c[2] - c[0] + 1
+            overlap = min(b[3], c[3]) - max(b[1], c[1]) + 1
+            if 0.5 <= wi / wj <= 2.0 and overlap >= 0.5 * min(b[3] - b[1] + 1, c[3] - c[1] + 1):
+                mirrored = True
+                break
+        if not mirrored:
+            keep.append(d)
+    return keep
 
 
 def match_detections(pred_boxes, scores, gt_boxes, thr=0.5):

@@ -6,6 +6,7 @@ Known protocols (the classification target):
     DMR    ETSI DMR tier II: 4FSK 4800 sym/s (+-648 / +-1944 Hz), 12.5 kHz channel, 2-slot TDMA of 30 ms, sync words
     P25    APCO P25 phase 1: C4FM 4800 sym/s (+-600 / +-1800 Hz), 12.5 kHz channel, continuous, frame sync word
     TETRA  ETSI TETRA: pi/4-DQPSK 18 ksym/s, RRC 0.35, 25 kHz channel, 4-slot TDMA (14.167 ms slots, 56.67 ms frame)
+Distractors (unlabelled hard negatives, in every set): AM (DSB voice), CW (keyed carrier), POCSAG (2-FSK paging, 1200 baud).
 Held-out protocols (open-set test only): NBFM (analog voice), WFM (broadcast FM), GSM (GMSK, 8-slot TDMA).
 
 Every generator returns complex baseband centred at 0 Hz at the scene sample rate (`fs`, default 2.56 MS/s) for the whole scene
@@ -25,9 +26,10 @@ from scipy.signal import fftconvolve, resample_poly
 
 DEFAULT_FS = 2_560_000.0
 PROTOCOLS = ["LTE", "DMR", "P25", "TETRA"]
-UNKNOWN_PROTOCOLS = ["NBFM", "WFM", "GSM"]
+UNKNOWN_PROTOCOLS = ["NBFM", "WFM", "GSM"]          # held out: only in test_openset
+DISTRACTORS = ["AM", "CW", "POCSAG"]                 # other emitters seen in every set but never labelled: hard negatives the detector must ignore
 COARSE = {"LTE": "Wideband", "DMR": "Narrowband", "P25": "Narrowband", "TETRA": "Narrowband",
-          "NBFM": "Unknown", "WFM": "Unknown", "GSM": "Unknown"}
+          "AM": "Distractor", "CW": "Distractor", "POCSAG": "Distractor", "NBFM": "Unknown", "WFM": "Unknown", "GSM": "Unknown"}
 MERGE_GAP_S = 5e-3            # bursts closer than this form one labelled transmission (one box)
 
 DMR_SLOT_S = 30e-3            # 2 slots per 60 ms frame
@@ -286,7 +288,37 @@ def gen_gsm(rng, n, fs):
     return y[start:start + n], dict(baud=rs, bt=bt)
 
 
-GENERATORS = {"LTE": gen_lte, "DMR": gen_dmr, "P25": gen_p25, "TETRA": gen_tetra, "NBFM": gen_nbfm, "WFM": gen_wfm, "GSM": gen_gsm}
+def gen_am(rng, n, fs):
+    """DSB-AM voice-like (carrier plus two sidebands, audio 300 Hz to 3-4 kHz): a narrow line with sidebands."""
+    fs_nat = 25_600.0
+    bw, m = float(rng.uniform(3000, 4000)), float(rng.uniform(0.3, 0.95))
+    a = _audio(rng, _native_len(n, fs_nat, fs), fs_nat, bw)
+    x = (1.0 + m * a).astype(np.complex64)
+    return _resample(x, fs_nat, fs, n, rng), dict(audio_bw_hz=bw, mod_index=m)
+
+
+def gen_cw(rng, n, fs):
+    """Unmodulated carrier with a little phase noise (keying comes from the burst envelope)."""
+    f0 = float(rng.uniform(-200.0, 200.0))
+    ph = np.cumsum(rng.standard_normal(n)) * 2 * np.pi * 2.0 / fs                      # about 2 Hz random-walk phase noise
+    return np.exp(1j * (2 * np.pi * f0 * np.arange(n) / fs + ph)).astype(np.complex64), dict(offset_hz=f0)
+
+
+def gen_pocsag(rng, n, fs):
+    """POCSAG paging: 2-FSK, 512 / 1200 / 2400 baud, +-4.5 kHz deviation, Gaussian-smoothed (a data signal 10 kHz wide)."""
+    baud = float(rng.choice([512.0, 1200.0, 2400.0]))
+    sps = 40
+    fs_nat = baud * sps
+    nn = _native_len(n, fs_nat, fs)
+    f = np.repeat(2.0 * rng.integers(0, 2, nn // sps + 4) - 1.0, sps)[:nn]
+    g = np.hanning(sps)
+    f = np.convolve(f, g / g.sum(), mode="same") * 4500.0
+    x = np.exp(2j * np.pi * np.cumsum(f) / fs_nat).astype(np.complex64)
+    return _resample(x, fs_nat, fs, n, rng), dict(baud=baud, deviation_hz=4500.0)
+
+
+GENERATORS = {"LTE": gen_lte, "DMR": gen_dmr, "P25": gen_p25, "TETRA": gen_tetra, "NBFM": gen_nbfm, "WFM": gen_wfm, "GSM": gen_gsm,
+              "AM": gen_am, "CW": gen_cw, "POCSAG": gen_pocsag}
 
 
 def gen_protocol(rng, name, n, fs=DEFAULT_FS):
@@ -372,7 +404,7 @@ def plan_activity(rng, name, n, fs=DEFAULT_FS):
     elif name == "GSM":
         active = set(int(v) for v in rng.choice(8, int(rng.integers(1, 9)), replace=False))
         env = _slot_bursts(rng, n, fs, GSM_SLOT_S, 8, active, 0.94, (0, n))
-    elif name in ("NBFM", "WFM"):
+    elif name in ("NBFM", "WFM", "AM", "CW", "POCSAG"):
         env = [_call_window(rng, n, fs)]
     else:
         raise ValueError(name)
@@ -396,8 +428,8 @@ if __name__ == "__main__":
     fs, n_fft, hop, n_fr = DEFAULT_FS, 2048, 1024, 192
     n = (n_fr - 1) * hop + n_fft
     win = get_window("hann", n_fft)
-    names = PROTOCOLS + UNKNOWN_PROTOCOLS
-    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
+    names = PROTOCOLS + DISTRACTORS + UNKNOWN_PROTOCOLS
+    fig, axes = plt.subplots(2, 5, figsize=(26, 9))
     for ax, name in zip(axes.ravel(), names):
         rng = np.random.default_rng(7)
         t0 = time.time()
