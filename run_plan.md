@@ -1,3 +1,5 @@
+# Run 1
+
 SPECTRUM_PROFILE=pilot jupyter nbconvert --to notebook --execute 01_create_dataset.ipynb --output-dir logs --output 01_create_dataset_pilot.ipynb
 
 
@@ -11,6 +13,3 @@ YOLO_RUN=detector_run1 CLASSIFIER_RUN=classifier_run1 \
 
 # where the detector fails, by SNR, protocol and box size (uses val)
 python3 diagnose_detector.py --weights runs/detector_run1/best.pt --conf 0.25
-
-# stats and standards checks of the data
-YOLO_RUN=detector_run1 jupyter nbconvert --to notebook --execute test.ipynb --output-dir logs --output test_run1.ipynb
