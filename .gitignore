@@ -2,6 +2,6 @@
 dataset/
 dataset_boost/
 external_test/
-
+runs/
 /**/__pycache__
 logs/dataset_hard/
