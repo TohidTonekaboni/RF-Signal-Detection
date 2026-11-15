@@ -190,7 +190,7 @@ def train(a):
             nn.utils.clip_grad_norm_(model.parameters(), 2.0)
             opt.step()
             sched.step()
-            tot, n = tot + float(loss) * len(y), n + len(y)
+            tot, n = tot + loss.item() * len(y), n + len(y)
         logits, labels = evaluate(model, va_loader, device)
         m = cls_metrics(labels, logits.argmax(1), va.snr)
         history.append(dict(epoch=epoch, train_loss=tot / n, val_accuracy=m["accuracy"], val_macro_f1=m["macro_f1"], seconds=time.time() - t0))
