@@ -92,6 +92,8 @@ def quantize_db(db):
 class SetReader:
     """Read one set: reader.spec_db(i), reader.iq(i), reader.boxes(i), reader.scenes / reader.signals tables."""
 
+    MAX_OPEN_SHARDS = 16
+
     def __init__(self, root, set_name, max_scenes=None):
         self.root, self.name = Path(root), set_name
         self.dir = self.root / "sets" / set_name
@@ -116,8 +118,12 @@ class SetReader:
 
     def shard(self, kind, k):
         key = (kind, int(k))
-        if key not in self._mm:
-            self._mm[key] = np.load(self.dir / f"shard_{int(k):04d}_{kind}.npy", mmap_mode="r")
+        if key in self._mm:
+            self._mm[key] = self._mm.pop(key)        # mark most recently used
+            return self._mm[key]
+        while len(self._mm) >= self.MAX_OPEN_SHARDS:  # evict oldest to stay under the fd limit
+            self._mm.pop(next(iter(self._mm)))
+        self._mm[key] = np.load(self.dir / f"shard_{int(k):04d}_{kind}.npy", mmap_mode="r")
         return self._mm[key]
 
     def spec_u8(self, i):
