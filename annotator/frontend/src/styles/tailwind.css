@@ -1,0 +1,51 @@
+@import 'tailwindcss';
+@import './fonts.css';
+
+/* Dark is the default theme; light overrides via [data-theme="light"] */
+@theme {
+  --color-bg: #0b0f14;
+  --color-panel: #121821;
+  --color-panel-2: #1a2230;
+  --color-border: #263042;
+  --color-fg: #e6edf6;
+  --color-muted: #8a97ab;
+  --color-accent: #22d3ee;
+  --color-warn: #f59e0b;
+  --color-select: #e879f9;
+  --color-danger: #f43f5e;
+  --color-ok: #34d399;
+  --font-sans: 'Vazirmatn Variable', 'Vazirmatn', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --radius-md: 0.5rem;
+}
+
+[data-theme='light'] {
+  --color-bg: #f4f6f9;
+  --color-panel: #ffffff;
+  --color-panel-2: #eef1f6;
+  --color-border: #d5dbe5;
+  --color-fg: #0f1722;
+  --color-muted: #5b6678;
+  --color-accent: #0891b2;
+  --color-warn: #b45309;
+  --color-select: #c026d3;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { background: var(--color-bg); color: var(--color-fg); font-family: var(--font-sans); line-height: 1.7; }
+  /* Never letter-space Persian text: it breaks joining */
+  [lang='fa'] * { letter-spacing: 0 !important; }
+  button, input, select, textarea { font: inherit; }
+  :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+}
+
+@layer components {
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-1.5 text-sm text-fg transition hover:border-accent disabled:cursor-not-allowed disabled:opacity-50; }
+  .btn-primary { @apply border-accent bg-accent text-black hover:brightness-110; }
+  .btn-danger { @apply border-danger text-danger hover:bg-danger/10; }
+  .input { @apply w-full rounded-md border border-border bg-panel-2 px-3 py-1.5 text-sm text-fg placeholder:text-muted; }
+  .card { @apply rounded-md border border-border bg-panel p-4; }
+  .label { @apply mb-1 block text-xs text-muted; }
+  .err { @apply mt-1 text-xs text-danger; }
+}
