@@ -41,7 +41,11 @@ src/
 - Access token is in memory only; the refresh token is an httpOnly cookie.
 - Deviation from the spec: tests/dev use a built-in mock (`src/api/mock.js`) instead of MSW. Swapping in MSW is straightforward since all traffic goes through `api/client.js`.
 
-## Serving (Caddy/nginx)
+## Serving (nginx image)
+
+`Dockerfile` builds the app (with `VITE_MOCK=false`, then `pnpm check:offline`) and copies `dist/` into `nginx:1.27-alpine`; `nginx/default.conf.template` is rendered at container start. See `../README.md` for the full stack.
+
+Generic guidance if you serve it some other way:
 
 Serve `dist/` with `index.html` as `no-cache`, hashed assets with a long cache, `/api` → FastAPI, and a strict CSP:
 

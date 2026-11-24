@@ -1,0 +1,256 @@
+# Spectrogram Annotator — whole application (single offline machine)
+#
+#   browser ──https──► web (nginx: React app + /api proxy + :9443 MinIO proxy)
+#                         ├─ /api ─────► api (FastAPI) ──► postgres
+#                         └─ :9443 ────► minio (presigned PUT/GET from the browser)
+#   worker (procrastinate, Postgres-backed queue) ──► postgres, minio
+#
+# Base images are the ones already present locally (nginx:1.27-alpine, postgres:16, minio/minio, minio/mc,
+# python:3.12-slim, node:20-alpine). Building api/web needs the pip/npm registry once; running needs nothing.
+#
+# First run:
+#   cp .env.example .env            # fill in every empty secret
+#   ./scripts/gen-certs.sh          # self-signed TLS cert for APP_HOST -> ./certs
+#   docker compose up -d --build
+#   docker compose run --rm api python -m app.cli create-admin
+#   open https://$APP_HOST:$HTTPS_PORT
+
+name: annotator
+
+x-backend-env: &backend-env
+  APP_ENV: production
+  APP_HOST: ${APP_HOST:?set APP_HOST}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  # procrastinate uses a plain libpq-style DSN
+  PROCRASTINATE_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (>= 32 random chars)}
+  ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-15}
+  REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-14}
+  # Internal endpoint: api/worker talk to MinIO directly on the private network.
+  S3_ENDPOINT: http://minio:9000
+  # Public endpoint: the host the BROWSER uses. Presigned URLs are signed for it and nginx forwards it unchanged.
+  S3_PUBLIC_ENDPOINT: https://${APP_HOST}:${MINIO_PUBLIC_PORT:-9443}
+  S3_ACCESS_KEY: ${S3_APP_ACCESS_KEY:?set S3_APP_ACCESS_KEY}
+  S3_SECRET_KEY: ${S3_APP_SECRET_KEY:?set S3_APP_SECRET_KEY}
+  S3_BUCKET_IMAGES: images
+  S3_BUCKET_THUMBS: thumbs
+  S3_BUCKET_EXPORTS: exports
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+  TZ: Asia/Tehran
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-backend-build: &backend-build
+  context: ./backend
+
+x-service: &service
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # ---------------------------------------------------------------- database
+  postgres:
+    <<: *service
+    image: postgres:${POSTGRES_TAG:-16}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-annotator}
+      TZ: UTC          # DB stores UTC; Tehran conversion happens in the UI
+      PGTZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # No published ports: reachable only on the internal network.
+
+  # ----------------------------------------------------------- object storage
+  minio:
+    <<: *service
+    image: minio/minio:${MINIO_TAG:-RELEASE.2024-08-29T01-40-52Z}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER: ${MINIO_BROWSER:-off}   # the admin console port is never published
+    volumes:
+      - miniodata:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # No published ports: the browser reaches S3 only through nginx on :9443.
+
+  # One-shot: create private buckets + an app-scoped user (the app never uses root credentials). Idempotent.
+  minio-init:
+    image: minio/mc:${MC_TAG:-RELEASE.2024-08-17T11-33-50Z}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_APP_ACCESS_KEY: ${S3_APP_ACCESS_KEY}
+      S3_APP_SECRET_KEY: ${S3_APP_SECRET_KEY}
+    networks: [internal]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # MinIO rejects these; fail with a readable message instead of a late mc error.
+        if [ "$$S3_APP_ACCESS_KEY" = "$$MINIO_ROOT_USER" ]; then
+          echo "ERROR: S3_APP_ACCESS_KEY must differ from MINIO_ROOT_USER (the app must not use root credentials). Edit .env." >&2; exit 1
+        fi
+        if [ "$${#S3_APP_ACCESS_KEY}" -lt 3 ] || [ "$${#S3_APP_SECRET_KEY}" -lt 8 ]; then
+          echo "ERROR: S3_APP_ACCESS_KEY needs >= 3 characters and S3_APP_SECRET_KEY >= 8. Edit .env." >&2; exit 1
+        fi
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        for b in images thumbs exports; do
+          mc mb --ignore-existing "local/$$b"
+          mc anonymous set none "local/$$b"        # private: reachable only through presigned URLs
+        done
+        cat > /tmp/annotator-policy.json <<'EOF'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            { "Effect": "Allow",
+              "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject",
+                         "s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],
+              "Resource": ["arn:aws:s3:::images/*","arn:aws:s3:::thumbs/*","arn:aws:s3:::exports/*"] },
+            { "Effect": "Allow",
+              "Action": ["s3:ListBucket","s3:GetBucketLocation","s3:ListBucketMultipartUploads"],
+              "Resource": ["arn:aws:s3:::images","arn:aws:s3:::thumbs","arn:aws:s3:::exports"] }
+          ]
+        }
+        EOF
+        mc admin policy create local annotator-app /tmp/annotator-policy.json
+        mc admin user add local "$$S3_APP_ACCESS_KEY" "$$S3_APP_SECRET_KEY"
+        mc admin policy attach local annotator-app --user "$$S3_APP_ACCESS_KEY" || true
+        echo "buckets + app user ready"
+
+  # --------------------------------------------------------------- migrations
+  migrate:
+    build: *backend-build
+    image: annotator-backend:${APP_VERSION:-local}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *backend-env
+    # Both steps are idempotent: alembic is a no-op at head; the procrastinate schema is applied only when missing.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        alembic upgrade head
+        if python -c "import psycopg,os,sys; c=psycopg.connect(os.environ['PROCRASTINATE_DSN']); sys.exit(0 if c.execute(\"select to_regclass('procrastinate_jobs')\").fetchone()[0] else 1)"; then
+          echo "procrastinate schema already present"
+        else
+          procrastinate --app=app.workers.app schema --apply
+        fi
+    networks: [internal]
+    restart: "no"
+
+  # ---------------------------------------------------------------------- api
+  api:
+    <<: *service
+    build: *backend-build
+    image: annotator-backend:${APP_VERSION:-local}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment: *backend-env
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers ${API_WORKERS:-2} --proxy-headers --forwarded-allow-ips=*
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  # ------------------------------------------------------------------- worker
+  # procrastinate worker: scheduled housekeeping (expired sessions, abandoned uploads, purged images).
+  worker:
+    <<: *service
+    build: *backend-build
+    image: annotator-backend:${APP_VERSION:-local}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    environment: *backend-env
+    command: >
+      procrastinate --app=app.workers.app worker
+      --queues default,exports --concurrency ${WORKER_CONCURRENCY:-2}
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  # ---------------------------------------------------------------------- web
+  # nginx: serves the built React app, proxies /api -> api and :9443 -> minio. Built from ./frontend.
+  web:
+    <<: *service
+    build:
+      context: ./frontend
+      args:
+        NODE_TAG: ${NODE_TAG:-20-alpine}
+        NGINX_TAG: ${NGINX_TAG:-1.27-alpine}
+    image: annotator-web:${APP_VERSION:-local}
+    depends_on:
+      api:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      APP_HOST: ${APP_HOST}
+      HTTPS_PORT: ${HTTPS_PORT:-443}
+      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-9443}
+      # Only these variables are substituted into the nginx template ($host, $uri, ... are left alone).
+      NGINX_ENVSUBST_FILTER: ^(APP_HOST|HTTPS_PORT|MINIO_PUBLIC_PORT)$$
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${MINIO_PUBLIC_PORT:-9443}:9443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro        # fullchain.pem + privkey.pem from scripts/gen-certs.sh
+    networks: [internal, edge]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz-proxy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # internal: no route to the outside world; every backend service lives here.
+  internal:
+    internal: true
+  # edge: gives only `web` a path to the published ports.
+  edge:
+
+volumes:
+  pgdata:
+  miniodata:

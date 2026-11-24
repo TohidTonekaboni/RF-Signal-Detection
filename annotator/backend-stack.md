@@ -8,7 +8,7 @@ Python · FastAPI · PostgreSQL · MinIO. Companion to [annotator-features.md](a
 Browser (React, RTL/Persian)
    │  HTTPS (JSON + presigned URLs)
    ▼
-Reverse proxy (Caddy/Traefik/nginx) ── TLS, gzip, security headers
+nginx (serves the React build, proxies /api and the MinIO port) ── TLS, gzip, security headers
    ├──► FastAPI (uvicorn workers)  ──► PostgreSQL   (metadata, annotations, users,
    │         │                                       job queue, login-attempt counters)
    │         └─ presigned URLs ───────► MinIO        (original images, thumbnails, exports)
@@ -50,7 +50,7 @@ annotator/backend/
 │   ├── db/                   # engine, session, base
 │   ├── models/               # SQLAlchemy models
 │   ├── schemas/              # Pydantic models
-│   ├── api/v1/               # auth, users, images, experiments, classes,
+│   ├── api/                  # auth, users, images, experiments, classes,
 │   │                         # annotations, reviews, exports, audit
 │   ├── services/             # business logic (no HTTP here)
 │   ├── storage/              # MinIO client wrapper (interface + impl)
@@ -76,9 +76,9 @@ Keep layering strict: **router → service → repository/storage**. Routers do 
 - Buckets: `images` (originals, immutable), `thumbs`, `exports`.
 - Object keys are generated server-side (`images/{yyyy}/{mm}/{uuid}.{ext}`). User filenames are stored in the DB only, never on disk or in keys.
 - **Upload flow (recommended):**
-  1. Client calls `POST /images/uploads` with filename, size and sha256. The API validates, checks for duplicates, and returns a presigned PUT URL plus an `image_id` in `pending` state.
+  1. Client calls `POST /images/presign` with filename, content type and size. The API validates type and size and returns a presigned PUT URL plus an `image_id` in `pending` state.
   2. Client PUTs directly to MinIO. For large files, use multipart.
-  3. Client calls `POST /images/{id}/complete`. A worker validates magic bytes, decodes with Pillow, extracts width/height, generates the thumbnail, and flips the status to `ready`. It deletes the object if validation fails.
+  3. Client calls `POST /images/{id}/complete`. The API (in a thread) hashes the bytes, rejects duplicates, fully decodes with Pillow (PNG/JPEG only, pixel-count cap), reads optional PNG text metadata, writes the thumbnail and flips the status to `ready`. On any failure it deletes the object and the row. Doing this inline (not in a worker) keeps the UI's single "upload finished" response simple; spectrograms are small enough for it.
 - Reads use short-lived presigned GET URLs (e.g. 5 min). MinIO is not exposed publicly except through the proxy.
 - Simpler MVP alternative: stream the upload through FastAPI (`UploadFile`) with a size cap. Keep the storage interface identical so you can switch later.
 
@@ -104,7 +104,7 @@ Use the data model in [annotator-features.md §13](annotator-features.md). Imple
 POST   /auth/login | /auth/refresh | /auth/logout | /auth/change-password
 GET    /users            POST /users        PATCH/DELETE /users/{id}      # admin
 GET    /images           (pagination, date range, filters)
-POST   /images/uploads   POST /images/{id}/complete   DELETE /images/{id}
+POST   /images/presign   POST /images/{id}/complete   PATCH /images/{id}   DELETE /images/{id}
 GET    /images/{id}/url                                   # presigned GET
 GET    /experiments      POST /experiments  PATCH/DELETE /experiments/{id}
 GET/POST/PATCH/DELETE /experiments/{id}/classes
@@ -120,7 +120,7 @@ GET    /healthz  /readyz
 
 - Prefer a **single `PUT` of the full annotation set per image** (small payloads, atomic, easy undo/redo and autosave) over per-box CRUD.
 - Consistent error envelope with machine-readable `code` (the frontend maps codes to Persian messages). The backend never returns user-facing Persian text.
-- Version the API under `/api/v1`. Disable `/docs` in production or protect it.
+- The API lives under `/api` (no version segment: the bundled React client calls `/api/...`). `/docs` is disabled in production.
 
 ## 8. Background jobs
 
@@ -145,11 +145,11 @@ GPU inference (auto-label) should run as a separate worker image so the API imag
 
 ## 10. Deployment (Docker Compose)
 
-Services: `proxy`, `api`, `worker`, `postgres`, `minio`, optional `worker-gpu`. (No Redis.)
+Services: `web` (nginx + built React app), `api`, `worker`, `postgres`, `minio`, plus one-shot `migrate` and `minio-init`. (No Redis, no GPU worker yet.)
 
 - Named volumes for `postgres` and `minio`. Healthchecks on all services. The `api` container runs `alembic upgrade head` at start (or as a one-shot job).
-- Nightly `pg_dump` plus `mc mirror` to a second local disk or external drive. There is no cloud backup, so document a restore drill.
-- TLS uses an internal CA or self-signed certificate (Caddy `tls internal`), since Let's Encrypt needs internet.
+- No automated backups are configured (decided). The `pgdata` and `miniodata` volumes are the only copy of the data, so copy them manually before upgrades or disk work.
+- TLS: nginx terminates it with a self-signed certificate from `scripts/gen-certs.sh` (Let's Encrypt needs internet). Clients import `certs/fullchain.pem` or accept the warning once. No HSTS, deliberately: with a self-signed cert it would make the warning un-bypassable.
 - Pre-pull and pin all image tags, and ship fonts (Vazirmatn) and all frontend assets locally, with no CDN references.
 - Environment-driven config. Provide `.env.example` and no real secrets in git.
 
@@ -176,3 +176,16 @@ Services: `proxy`, `api`, `worker`, `postgres`, `minio`, optional `worker-gpu`. 
 - Single offline machine is decided. Is there more than one machine on the LAN, with browsers reaching the server by IP or hostname? (Decides the TLS certificate setup.)
 - Expected image count and resolution? (Decides offset vs keyset pagination and the tiling or preview strategy.)
 - Is a GPU available for auto-labeling workers?
+
+## 14. As built (`backend/`)
+
+The backend was written against the React client in `frontend/`, so its contract wins over the sketches above. See `backend/README.md` for endpoints and commands. Differences from the plan:
+
+- **Roles:** `admin`, `annotator`, `reviewer` (the three the UI knows). Manager/Viewer from the feature spec are not implemented.
+- **Review workflow, per-experiment membership, assignments:** not implemented (the UI has none yet). Reviewers get read-only access to annotations.
+- **Experiments** start with every existing library image (the UI has no image picker); `POST /experiments/{id}/images` adds later uploads.
+- **Annotations:** one `PUT` per image replacing the full set, `If-Match: <int version>`, atomic compare-and-swap in SQL; boxes keep the client's ids.
+- **Refresh tokens:** rotated on every use, stored hashed; a 10 s grace window tolerates two tabs refreshing together, but only for rotated tokens (never after logout/password change/deactivation). Replaying an old rotated token revokes all of that user's sessions.
+- **Password reset:** `POST /users/{id}/reset-password` returns a one-time password to the admin (the current UI discards it, see README).
+- **No GPU / auto-label worker yet:** the `worker-gpu` service was removed from `docker-compose.yml` until there is an auto-label task to run.
+- **Reverse proxy is nginx** (`frontend/nginx/default.conf.template`, baked into the web image). It forwards the `Host` header unchanged to MinIO on :9443 (presigned signatures cover it), overwrites `X-Forwarded-For` with the real client IP (so the login lockout can't be dodged by spoofing it), and answers the S3 CORS preflight itself.

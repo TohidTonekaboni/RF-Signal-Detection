@@ -125,7 +125,7 @@ Define colors, radii and fonts once in `styles/tailwind.css`, with dark as defau
 
 ## 8. Offline build and serving
 
-- `pnpm build` produces static assets in `dist/`, served by the proxy (Caddy/nginx) alongside `/api` → FastAPI and presigned MinIO routes.
+- `pnpm build` produces static assets in `dist/`, served by the `web` nginx image (`Dockerfile`, `nginx/default.conf.template`) alongside `/api` → FastAPI and the MinIO presigned-URL port.
 - **No external URLs** in the bundle: fonts via `@fontsource*`, icons via `lucide-react` (inline SVG), no analytics, no CDN scripts. Add a CI/grep check for `https://` in `dist/`.
 - Commit `pnpm-lock.yaml`, and keep an offline package cache (`pnpm fetch` / a mirrored store) so the build can run on a machine without internet.
 - Use content-hashed filenames and a long cache lifetime, with `index.html` as `no-cache`.

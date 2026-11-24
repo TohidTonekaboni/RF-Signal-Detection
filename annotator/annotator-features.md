@@ -183,7 +183,7 @@ An **experiment** is an independent labeling project with its own task type, cla
 
 **Reliability & operations**
 - Docker Compose deployment (web, API, DB, storage, worker) — see `docker-compose.yml`
-- Automated DB backups and migrations; background worker for thumbnails, exports, auto-labeling
+- DB migrations (no automated backups); background worker for thumbnails, exports, auto-labeling
 - Structured logging, health endpoints, error monitoring
 - Unit/integration tests for permissions, date conversion (Jalali ↔ UTC, incl. leap years and range boundaries), annotation CRUD, and export-format correctness
 
@@ -206,7 +206,7 @@ An **experiment** is an independent labeling project with its own task type, cla
 9. **Concurrency control** (S3) — prevents silent overwrites.
 10. **Inter-annotator agreement + gold images** (S6–S8) — label quality measurement.
 11. **Background jobs** for export / thumbnails / auto-label.
-12. **Backups, logging, rate limiting, 2FA** (Section 11, A5, A7).
+12. **Logging, rate limiting, 2FA** (Section 11, A5, A7).
 
 ---
 

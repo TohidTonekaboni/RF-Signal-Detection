@@ -26,6 +26,18 @@ import { fmtNumber } from '@/lib/digits.js'
 
 const AUTOSAVE_MS = 2000
 
+/**
+ * Images live on the MinIO origin (:9443). crossOrigin='anonymous' keeps the Konva canvas untainted so the
+ * brightness/contrast/colormap filters can read pixels; nginx answers with a matching Access-Control-Allow-Origin.
+ */
+function loadImg(src, onload) {
+  const im = new window.Image()
+  im.crossOrigin = 'anonymous'
+  if (onload) im.onload = () => onload(im)
+  im.src = src
+  return im
+}
+
 export default function AnnotatePage() {
   const { t } = useTranslation()
   const { expId, imageId } = useParams()
@@ -56,12 +68,12 @@ export default function AnnotatePage() {
     if (!image) return
     let cancelled = false
     setHtmlImage(null)
-    const thumb = new window.Image(); thumb.onload = () => !cancelled && setHtmlImage((cur) => cur || thumb); thumb.src = image.thumb_url
-    const full = new window.Image(); full.onload = () => !cancelled && setHtmlImage(full); full.src = image.url
+    loadImg(image.thumb_url, (thumb) => !cancelled && setHtmlImage((cur) => cur || thumb))
+    loadImg(image.url, (full) => !cancelled && setHtmlImage(full))
     return () => { cancelled = true }
   }, [image])
   // prefetch next
-  useEffect(() => { const n = images[idx + 1]; if (n) { const p = new window.Image(); p.src = n.url } }, [idx, images])
+  useEffect(() => { const n = images[idx + 1]; if (n) loadImg(n.url) }, [idx, images])
 
   // ---- container size & fit
   const wrapRef = useRef(null)
