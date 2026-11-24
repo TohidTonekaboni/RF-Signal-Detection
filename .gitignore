@@ -6,3 +6,4 @@ runs/
 /**/__pycache__
 logs/dataset_hard/
 autolabeling/mobile_sam.pt
+/**/.DS_Store
