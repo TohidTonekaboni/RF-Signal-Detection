@@ -5,3 +5,4 @@ external_test/
 runs/
 /**/__pycache__
 logs/dataset_hard/
+autolabeling/mobile_sam.pt
